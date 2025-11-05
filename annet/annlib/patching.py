@@ -10,6 +10,7 @@ from typing import (
     Callable,
     Iterator,
     Literal,
+    TypeAlias,
     TypedDict,
 )
 
@@ -174,7 +175,7 @@ def string_similarity(s: str, pattern: str) -> float:
 def rule_weight(row: str, rule: CompiledOrderingItem, regexp_key: Literal["direct_regexp", "reverse_regexp"]) -> float:
     return string_similarity(row, rule["attrs"][regexp_key].pattern)
 
-
+SortKey: TypeAlias = tuple[tuple[float, ...], str]
 
 class Orderer:
     def __init__(self, rb: CompiledTree, vendor: str) -> None:
@@ -199,7 +200,7 @@ class Orderer:
         row: tuple[str, ...],
         cmd_direct: bool,
         scope: str | None = None,
-    ) -> tuple[float, ...]:
+    ) -> SortKey:
         """
         returns a vector of numbers that can be used as sort key
         """
@@ -222,19 +223,23 @@ class Orderer:
 
         from itertools import zip_longest
 
-        vectors: list[tuple[float, tuple[float, ...]]] = [] # [(weight, vector), ...]
-
+        vectors: list[tuple[float, SortKey]] = [] # [(weight, vector), ...]
+        # INF = 1e6  # regular inf doesnt play well with sorting
+        INF = float('inf')
         for rb_row in flatten_order_rb(self.rb):
             vector: list[float] = []
             weight = 0.0
+            rb_rule_raw = ''
+            matched = True
+
             for rb_item, row_item in zip_longest(rb_row, row, fillvalue=None):
-                print(rb_item, cmd_direct, row_item)
+                # print(rb_item, cmd_direct, row_item)
                 if rb_item is None:
-                    ... # ?
+                    matched = True
                     break
 
                 if row_item is None:
-                    ... # ?
+                    matched = False
                     break
 
                 rb_idx, rb_rule_raw, rb_attrs = rb_item
@@ -261,17 +266,19 @@ class Orderer:
                     vector.append(rb_idx)
 
                 elif block_exit and block_exit == row_item:
-                    vector.append(1e6)
+                    vector.append(INF)
 
                 else:
+                    matched = False
                     break
-            else:
-                vectors.append((weight, tuple(vector)))
 
-        import pprint; print('row:');pprint.pp(row)
+            if matched:
+                vectors.append((weight, (tuple(vector), rb_rule_raw)))
+
+        # import pprint; print('row:');pprint.pp(row)
         # import pprint; print('vectors:');pprint.pp(vectors)
         if not vectors:
-            return (1e6,)
+            return ((INF, {True: +1, False: -1}[cmd_direct]), '')
         vectors.sort()
         return vectors[-1][1]
 
@@ -514,7 +521,7 @@ def _iterate_over_patch(
                         yield _PatchRow(
                             row=(row, *sub_row["row"]),
                             attrs=sub_row["attrs"],
-                            direct=direct,
+                            direct=sub_row["direct"],
                         )
 
 def make_patch(
@@ -536,14 +543,9 @@ def make_patch(
         _root_pre=(_root_pre or pre),
     ))
     import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
-    def ic(x):
-        print(x)
-        return x
-    patch_rows.sort(key=lambda row: (
-        orderer.get_order(row["row"], cmd_direct=row["direct"]),
-        row["row"],
-        row["direct"],
-    ))
+    _sort_keys = {row["row"]:orderer.get_order(row["row"], cmd_direct=row["direct"]) for row in patch_rows}
+    import pprint;  print('_sort_keys:'); pprint.pp(_sort_keys)
+    patch_rows.sort(key=lambda row: orderer.get_order(row["row"], cmd_direct=row["direct"]))
     # import pprint;  print('patch_rows_sorted:'); pprint.pp(patch_rows)
 
     tree = PatchTree()
