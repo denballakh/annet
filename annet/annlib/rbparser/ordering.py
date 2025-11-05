@@ -1,3 +1,5 @@
+from __future__ import annotations
+from collections.abc import Iterator
 import functools
 import re
 from collections import OrderedDict as odict
@@ -7,12 +9,31 @@ from valkit.common import valid_bool, valid_string_list
 from annet.vendors import registry_connector
 from . import syntax
 
+from typing import TypedDict, Any
 
 # =====
+# 'global' is a keyword, so we cant use standard TypedDict declaration
+CompiledOrderingAttrs = TypedDict("CompiledOrderingAttrs", {
+    "direct_regexp": re.Pattern[str],
+    "reverse_regexp": re.Pattern[str],
+    "order_reverse": bool,
+    "global": bool,  # TODO: rename to something else so that it is not a keyword
+    "scope": list[str],
+    "raw_rule": str,
+    "context": Any,
+})
+
+class CompiledOrderingItem(TypedDict):
+    attrs: CompiledOrderingAttrs
+    children: CompiledTree
+
+CompiledTree = list[tuple[str, CompiledOrderingItem]]
+
+
 @functools.lru_cache()
-def compile_ordering_text(text, vendor):
+def compile_ordering_text(text: str, vendor: str):
     return _compile_ordering(
-        tree=syntax.parse_text(text, params_scheme={
+        tree=syntax.parse_text_multi(text, params_scheme={
             "order_reverse": {
                 "validator": valid_bool,
                 "default":   False,
@@ -30,7 +51,7 @@ def compile_ordering_text(text, vendor):
     )
 
 
-def decompile_ordering_rulebook(rb) -> str:
+def decompile_ordering_rulebook(rb) -> str: # FIXME
     def _decompile_ordering_text(rb, level):
         indent = "  "
         for attrs in rb.values():
@@ -40,12 +61,27 @@ def decompile_ordering_rulebook(rb) -> str:
 
 
 # =====
-def _compile_ordering(tree, reverse_prefix):
-    ordering = odict()
-    for (rule_id, attrs) in tree.items():
+
+
+def flatten_order_rb(rb: CompiledTree) -> Iterator[tuple[tuple[int, str, CompiledOrderingAttrs], ...]]:
+    for i, (raw_rule, rule) in enumerate(rb):
+            if rule["children"]:
+                for x in flatten_order_rb(rule["children"]):
+                    yield ((i, raw_rule, rule["attrs"]), *x)
+
+            else:
+                # FIXME: think about this
+                yield ((i, raw_rule, rule["attrs"]),)
+
+def _compile_ordering(tree: syntax.ParsedTree, reverse_prefix: str) -> CompiledTree:
+    # import pprint; print('_compile_ordering:');pprint.pp(tree)
+    ordering: CompiledTree = []
+    for (rule_id, attrs) in tree:
         if attrs["type"] == "normal":
-            ordering[rule_id] = {
-                "attrs": {
+            ordering.append((
+                rule_id,
+                {
+                "attrs": CompiledOrderingAttrs({
                     "direct_regexp": syntax.compile_row_regexp(attrs["row"]),
                     "reverse_regexp": (
                         syntax.compile_row_regexp(reverse_prefix + " " + attrs["row"])
@@ -57,7 +93,8 @@ def _compile_ordering(tree, reverse_prefix):
                     "scope": attrs["params"]["scope"],
                     "raw_rule": attrs["raw_rule"],
                     "context": attrs["context"],
-                },
+                }),
                 "children": _compile_ordering(attrs["children"], reverse_prefix),
-            }
+            }))
+    # import pprint; print('_compile_ordering result:');pprint.pp(ordering)
     return ordering

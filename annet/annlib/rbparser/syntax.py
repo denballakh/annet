@@ -1,15 +1,36 @@
+from __future__ import annotations
 import functools
 import re
 from collections import OrderedDict as odict
+from collections.abc import Iterator
+from typing import Any, TypedDict
 
 from annet.annlib import lib
 from annet.vendors import tabparser
 
 
 # =====
-def parse_text(text, params_scheme):
-    return _parse_tree_with_params(tabparser.parse_to_tree(text, _split_rows, ["#"]), params_scheme)
+def parse_text(text: str, params_scheme) -> odict:
+    ret =  _parse_tree_with_params(tabparser.parse_to_tree(text, _split_rows, ["#"]), params_scheme)
+    # import pprint; print('parse_text:');pprint.pp(ret)
+    return ret
 
+
+class ParsedTreeNode(TypedDict):
+    row: str
+    type: str
+    params: dict[str, Any]
+    children: ParsedTree
+    raw_rule: str
+    context: Any
+
+ParsedTree = list[tuple[str, ParsedTreeNode]]
+
+
+def parse_text_multi(text: str, params_scheme) -> ParsedTree:
+    ret =  _parse_tree_with_params_multi(tabparser.parse_to_tree_multi(text, _split_rows, ["#"]), params_scheme)
+    # import pprint; print('parse_text_multi:');pprint.pp(ret)
+    return ret
 
 @functools.lru_cache()
 def compile_row_regexp(row, flags=0):
@@ -40,7 +61,7 @@ def compile_row_regexp(row, flags=0):
 
 
 # =====
-def _split_rows(text):
+def _split_rows(text: str) -> Iterator[str]:
     for row in re.split(r"\n(?!\s*%(?!context))", text):
         yield row.replace("\n", " ")
 
@@ -69,6 +90,32 @@ def _parse_tree_with_params(raw_tree, scheme, context=None):
             "raw_rule": raw_rule,
             "context": context.copy(),
         }
+    return tree
+
+def _parse_tree_with_params_multi(raw_tree: tabparser.SimpleTree, scheme, context: dict | None = None) -> ParsedTree:
+    tree: ParsedTree = []
+    if context is None:
+        context = {}
+    for (raw_rule, children) in raw_tree:
+        (row, params) = _parse_raw_rule(raw_rule, scheme)
+        row_type = "normal"
+
+        if row.startswith("!"):
+            row = row[1:].strip()
+            if len(row) == 0:
+                continue
+            row_type = "ignore"
+        elif context_raw := params.get("context"):
+            context = _parse_context(context, context_raw)
+            continue
+        tree.append((raw_rule, {
+            "row": row,
+            "type": row_type,
+            "params": params,
+            "children": _parse_tree_with_params_multi(children, scheme, context.copy()),
+            "raw_rule": raw_rule,
+            "context": context.copy(),
+        }))
     return tree
 
 

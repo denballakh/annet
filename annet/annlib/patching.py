@@ -1,20 +1,21 @@
+from __future__ import annotations
+from collections.abc import Iterable
 import copy
 import operator
+import re
 import textwrap
 from collections import OrderedDict as odict
 from typing import (
     Any,
-    Dict,
+    Callable,
     Iterator,
-    List,
-    Optional,
-    Tuple,
-    Union,
+    Literal,
+    TypedDict,
 )
 
 from .lib import jun_activate, merge_dicts, strip_annotation, uniq
 from .rbparser import platform
-from .rbparser.ordering import compile_ordering_text
+from .rbparser.ordering import CompiledOrderingAttrs, CompiledOrderingItem, CompiledTree, compile_ordering_text, flatten_order_rb
 from .rulebook.common import call_diff_logic
 from .rulebook.common import default as common_default
 from annet.vendors.tabparser import CommonFormatter
@@ -34,7 +35,7 @@ class AclNotExclusiveError(AclError):
 class PatchRow:
     row: str
 
-    def __init__(self, row: str):
+    def __init__(self, row: str) -> None:
         self.row = row
 
     def __eq__(self, other: object) -> bool:
@@ -53,11 +54,11 @@ class PatchRow:
 
 class PatchItem:
     row: str
-    child: "Union[PatchTree, None]"
-    context: Dict[str, str]
-    sort_key: Tuple[Any, ...]
+    child: PatchTree | None
+    context: dict[str, str]
+    sort_key: tuple[Any, ...]
 
-    def __init__(self, row, child, context, sort_key):
+    def __init__(self, row: str, child: PatchTree | None, context: dict[str, str], sort_key: tuple[Any, ...]) -> None:
         self.row = row
         self.child = child
         self.context = context
@@ -72,7 +73,7 @@ class PatchItem:
         }
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> "PatchItem":
+    def from_json(cls, data: dict[str, Any]) -> PatchItem:
         return cls(
             row=data["row"],
             child=PatchTree.from_json(data["child"]) if data["child"] is not None else None,
@@ -80,10 +81,10 @@ class PatchItem:
             sort_key=data["sort_key"],
         )
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f"PatchItem(\n"
-            f'    row="{self.row}",\n'
+            f"    row={self.row!r},\n"
             f"    child={textwrap.indent(str(self.child), '    ').strip()},\n"
             f"    context={self.context}\n"
             f"    sort_key={self.sort_key}\n"
@@ -92,17 +93,17 @@ class PatchItem:
 
 
 class PatchTree:
-    itms: List[PatchItem]
+    itms: list[PatchItem]
 
-    def __init__(self, row: Optional[str] = None):
+    def __init__(self, row: str | None = None) -> None:
         self.itms = []
         if row:
             self.add(row, {})
 
-    def add(self, row: str, context: Dict[str, str], sort_key=()) -> None:
+    def add(self, row: str, context: dict[str, str], sort_key: tuple[Any, ...] = ()) -> None:
         self.itms.append(PatchItem(row, None, context, sort_key))
 
-    def add_block(self, row: str, subtree: "Optional[PatchTree]" = None, context: Dict[str, str] = None, sort_key=()) -> "PatchTree":
+    def add_block(self, row: str, subtree: PatchTree | None = None, context: dict[str, str] | None = None, sort_key: tuple[Any, ...] = ()) -> PatchTree:
         if subtree is None:
             subtree = PatchTree()
         if context is None:
@@ -110,11 +111,11 @@ class PatchTree:
         self.itms.append(PatchItem(row, subtree, context, sort_key))
         return subtree
 
-    def items(self) -> "Iterator[Tuple[str, Union[PatchTree, None]]]":
+    def items(self) -> Iterator[tuple[str, PatchTree | None]]:
         for item in self.itms:
             yield str(item.row), item.child
 
-    def asdict(self) -> Dict:
+    def asdict(self) -> odict[str, Any]:
         ret = odict()
         for row in uniq(i.row for i in self.itms):
             subtrees = []
@@ -131,7 +132,7 @@ class PatchTree:
         return [i.to_json() for i in self.itms]
 
     @classmethod
-    def from_json(cls, data: list[dict[str, Any]]) -> "PatchTree":
+    def from_json(cls, data: list[dict[str, Any]]) -> PatchTree:
         ret = cls()
         ret.itms = [PatchItem.from_json(i) for i in data]
         return ret
@@ -139,13 +140,13 @@ class PatchTree:
     def sort(self) -> None:
         self.itms.sort(key=operator.attrgetter("sort_key"))
         for item in self.itms:
-            if item.child:
+            if item.child is not None:
                 item.child.sort()
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return bool(self.itms)
 
-    def __str__(self):
+    def __str__(self) -> str:
         n = ",\n"
         itms = map(lambda x: textwrap.indent(str(x), "    "), self.itms)
         return (
@@ -157,8 +158,26 @@ class PatchTree:
         )
 
 
+def string_similarity(s: str, pattern: str) -> float:
+    """
+    >>> string_similarity("abc", "ab")
+    0.6666666666666666
+    >>> string_similarity("aabb", "ab")
+    0.5
+    >>> string_similarity("aabb", "x")
+    0.0
+    >>> string_similarity("a", "ab")
+    1.0
+    """
+    return len(set(s) & set(pattern)) / len(s)
+
+def rule_weight(row: str, rule: CompiledOrderingItem, regexp_key: Literal["direct_regexp", "reverse_regexp"]) -> float:
+    return string_similarity(row, rule["attrs"][regexp_key].pattern)
+
+
+
 class Orderer:
-    def __init__(self, rb, vendor):
+    def __init__(self, rb: CompiledTree, vendor: str) -> None:
         self.rb = rb
         self.vendor = vendor
 
@@ -168,91 +187,131 @@ class Orderer:
         for _, defs in reversed(ref_tracker.configs()):
             self.insert(defs)
 
-    def insert(self, rules):
+    def insert(self, rules: PatchTree) -> None:
         if isinstance(rules, dict):
             fmtr = CommonFormatter()
             rules = fmtr.join(rules)
-        rules = compile_ordering_text(rules, self.vendor)
-        self.rb = merge_dicts(rules, self.rb)
+        rb = compile_ordering_text(rules, self.vendor)
+        self.rb = self.rb + rb
 
-    def rule_weight(self, row, rule, regexp_key):
-        return len(set(row).intersection(set(rule["attrs"][regexp_key].pattern))) / len(row)
-
-    def get_order(self, row, cmd_direct, scope: str | None = None):
-        f_order = None
-        f_weight = 0
-        f_rule = ""
-        children = []
-        ordering = self.rb
-
+    def get_order(
+        self,
+        row: tuple[str, ...],
+        cmd_direct: bool,
+        scope: str | None = None,
+    ) -> tuple[float, ...]:
+        """
+        returns a vector of numbers that can be used as sort key
+        """
+        # from pprint import pp; print('Orderer.get_order.row:');pp(row)
+        # from pprint import pp; print('Orderer.get_order.rb:');pp(self.rb)
         block_exit = registry_connector.get()[self.vendor].exit
 
-        for (order, (raw_rule, rule)) in enumerate(ordering.items()):
-            if (
-                (rule_scope := rule["attrs"]["scope"]) is not None
-                and scope not in rule_scope
-            ):
-                continue
+        # print("!" * 50)
+        # print("v" * 50)
+        # print("!" * 50)
 
-            if rule["attrs"]["global"]:
-                children.append((raw_rule, rule))
+        # for x in flatten_order_rb(self.rb):
+        #     from pprint import pp; pp(x)
 
-            direct_matched = bool(rule["attrs"]["direct_regexp"].match(row))
-            if not rule["attrs"]["order_reverse"] and (direct_matched or rule["attrs"]["reverse_regexp"].match(row)):
-                # если не указано order_reverse - правило считается прямым
-                regexp_key = ("direct_regexp" if direct_matched else "reverse_regexp")
-                weight = self.rule_weight(row, rule, regexp_key)
-                if f_order is None or f_weight < weight:
-                    f_order = order
-                    f_weight = weight
-                    f_rule = (raw_rule, rule["attrs"][regexp_key])
-                children.extend(ordering[raw_rule]["children"].items())
+        # print("!" * 50)
+        # print("^" * 50)
+        # print("!" * 50)
 
-            elif rule["attrs"]["order_reverse"] and not cmd_direct and direct_matched:
-                weight = self.rule_weight(row, rule, "direct_regexp")
-                if f_order is None or f_weight < weight or (f_weight == weight and not cmd_direct):
-                    f_order = order
-                    f_weight = weight
-                    f_rule = (raw_rule, rule["attrs"]["direct_regexp"])
-                    cmd_direct = True
-                children = []
+        # def matches(row: tuple[str, ...], rb_row: tuple[tuple[int, str, CompiledOrderingAttrs], ...]) -> tuple[float, ...] | None:
 
-            elif block_exit and block_exit == row:
-                f_order = float("inf")
-                f_rule = (raw_rule, block_exit)
-                cmd_direct = True
-                children = []
+        from itertools import zip_longest
 
-        return (f_order or 0), cmd_direct, odict(children), f_rule
+        vectors: list[tuple[float, tuple[float, ...]]] = [] # [(weight, vector), ...]
 
-    def order_config(self, config):
+        for rb_row in flatten_order_rb(self.rb):
+            vector: list[float] = []
+            weight = 0.0
+            for rb_item, row_item in zip_longest(rb_row, row, fillvalue=None):
+                # print(rb_item, cmd_direct, row_item)
+                if rb_item is None:
+                    ... # ?
+                    break
+
+                if row_item is None:
+                    ... # ?
+                    break
+
+                rb_idx, rb_rule_raw, rb_attrs = rb_item
+                # print(row_item, rb_item)
+
+                direct_matched = bool(rb_attrs["direct_regexp"].match(row_item))
+                reverse_matched = bool(rb_attrs["reverse_regexp"].match(row_item))
+                order_reverse = rb_attrs["order_reverse"]
+                # breakpoint()
+                if not order_reverse and direct_matched:
+                    weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
+                    if direct_matched:
+                        vector.append(+rb_idx + 100)
+                    else:
+                        vector.append(-rb_idx + 200)
+
+                elif not order_reverse and reverse_matched:
+                    # FIXME: add comment
+                    weight += string_similarity(row_item, rb_attrs["reverse_regexp"].pattern) * 0.5
+                    if direct_matched:
+                        vector.append(+rb_idx + 100)
+                    else:
+                        vector.append(-rb_idx + 200)
+
+                elif order_reverse and not cmd_direct and direct_matched:
+                    weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
+                    weight += 1e-6 # why? idk
+                    vector.append(rb_idx)
+
+                elif block_exit and block_exit == row_item:
+                    vector.append(float("inf"))
+
+                else:
+                    break
+            else:
+                vectors.append((weight, tuple(vector)))
+
+        # import pprint; print('vectors:');pprint.pp(vectors)
+        if not vectors:
+            return (float("inf"),)
+        vectors.sort()
+        return vectors[-1][1]
+
+        # f_order = None
+        # f_weight = 0
+        # f_rule = ("", "")
+        # children: CompiledTree = []
+        # ordering = self.rb
+
+
+        # for (order, (raw_rule, rule)) in enumerate(ordering):
+
+        # return (f_order or 0), cmd_direct, children, f_rule
+
+    def order_config(self, config: dict[str, Any]) -> dict[str, Any]:
         if self.vendor not in registry_connector.get():
             return config
         if not config:
             return odict()
 
-        ordered = []
-        reverse_prefix = registry_connector.get()[self.vendor].reverse
+        ret: dict[str, Any] = {}
+        sort_keys: dict[str, tuple[int, ...]] = {}
 
+        reverse_prefix = registry_connector.get()[self.vendor].reverse
         for row, children in config.items():
             cmd_direct = not row.startswith(reverse_prefix)
-            (order, direct, rb, _) = self.get_order(row, cmd_direct)
-            child_orderer = Orderer(rb, self.vendor)
-            children = child_orderer.order_config(children)
-            ordered.append({
-                "row": row,
-                "children": children,
-                "direct": direct,
-                "order": order,
-            })
+
+            sort_key = self.get_order(row, cmd_direct)
+            children = self.order_config(children)
+            ret[row] = children
+            sort_keys[row] = sort_key
 
         return odict(
-            (item["row"], item["children"])
-            for item in sorted(ordered, key=(lambda item: (
-                (item["order"] if item["direct"] else -item["order"]),
-                item["direct"],
-            )))
+            (row, children)
+            for row, children in sorted(ret.items(), key=lambda kv: sort_keys[kv[0]])
         )
+
 
 
 # =====
@@ -349,7 +408,7 @@ def apply_diff_rb(old, new, rb):
     return diff_pre
 
 
-def make_pre(diff: Diff, _parent_match=None) -> Dict[str, Any]:
+def make_pre(diff: Diff, _parent_match=None) -> dict[str, Any]:
     pre = odict()
     for (op, row, children, match) in diff:
         if _parent_match and _parent_match["attrs"]["multiline"]:
@@ -397,15 +456,38 @@ _comment_macros = {
     "!!HYES!!": "!!question!![Y/N]!!answer!!Y!! !!question!![y/n]!!answer!!Y!! !!question!![Yes/All/No/Cancel]!!answer!!Y!!"
 }
 
+class _PreAttrs(TypedDict):
+    logic: Callable[..., Iterable[tuple[bool | None, str, odict[str, _Content] | None]]]
+    diff_logic: Callable
+    regexp: re.Pattern[str]
+    reverse: str
+    comment: list[str]
+    multiline: bool
+    parent: bool
+    force_commit: bool
+    ignore_case: bool
+    context: Any
 
-def make_patch(pre, rb, hw, add_comments, orderer=None, _root_pre=None, do_commit=True):
-    patch = []
-    if not orderer:
-        orderer = Orderer(rb["ordering"], hw.vendor)
+class _DiffItem(TypedDict):
+    row: str
+    children: odict[str, _Content]
 
+class _Content(TypedDict):
+    attrs: _PreAttrs
+    items: odict[str | tuple[()], dict[Op, list[_DiffItem]]]
+
+class _PatchRow(TypedDict):
+    row: tuple[str, ...]
+    attrs: _PreAttrs
+    direct: bool
+
+def _iterate_over_patch(
+    pre: odict[str, _Content],
+    hw,
+    _root_pre: odict[str, _Content] | None = None,
+) -> Iterable[_PatchRow]:
     for (raw_rule, content) in pre.items():
         for (key, diff) in content["items"].items():
-            # чтобы logic не мог поменять атрибуты
             rule_pre = content.copy()
             attrs = copy.deepcopy(rule_pre["attrs"])
 
@@ -418,59 +500,61 @@ def make_patch(pre, rb, hw, add_comments, orderer=None, _root_pre=None, do_commi
                 root_pre=(_root_pre or pre),
             )
             for (direct, row, sub_pre) in iterable:
-                if direct is not None:
-                    patch_row = row
-                    if add_comments:
-                        comments = " ".join(attrs["comment"])
-                        for (macro, m_value) in _comment_macros.items():
-                            comments = comments.replace(macro, m_value)
-                        if comments:
-                            patch_row = "%s %s" % (row, comments)
+                if direct is None:
+                    continue
 
-                    # pylint: disable=unused-variable
-                    (order, order_direct, ordering, order_rule) = orderer.get_order(row, direct, scope="patch")
-                    fmt_row = patch_row
-                    # fmt_row += "  # %s" % str(order_rule)  # uncomment to debug ordering
+                yield _PatchRow(
+                    row=(row,),
+                    attrs=attrs,
+                    direct=direct,
+                )
+                if sub_pre is not None:
+                    for sub_row in _iterate_over_patch(
+                        sub_pre,
+                        hw,
+                        _root_pre=(_root_pre or pre),
+                    ):
+                        yield _PatchRow(
+                            row=(row, *sub_row["row"]),
+                            attrs=sub_row["attrs"],
+                            direct=direct,
+                        )
 
-                    if not do_commit and attrs.get("force_commit", False):
-                        # if do_commit is false skip patch that couldn't be applied without commit
-                        continue
+def make_patch(
+    pre: odict[str, _Content],
+    rb: dict[str, CompiledTree],  # not correct, but good enough for now; TODO: make typeddict for this
+    hw,
+    add_comments: bool,
+    orderer: Orderer | None = None,
+    _root_pre: odict[str, _Content] | None = None,
+    do_commit: bool = True,
+) -> PatchTree:
+    if not orderer:
+        orderer = Orderer(rb["ordering"], hw.vendor)
+    import pprint; print('pre:');pprint.pp(pre)
+    # breakpoint()
+    patch_rows = list(_iterate_over_patch(
+        pre,
+        hw,
+        _root_pre=(_root_pre or pre),
+    ))
+    # import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
+    patch_rows.sort(key=lambda row: orderer.get_order(row["row"], row["direct"]))
 
-                    patch.append({
-                        "row": fmt_row,
-                        "children": (PatchTree() if not sub_pre else make_patch(
-                            pre=sub_pre,
-                            rb={"ordering": ordering},  # Нужен только кусок, касающийся правил для ордеринга
-                            hw=hw,
-                            add_comments=add_comments,
-                            _root_pre=(_root_pre or pre),
-                            do_commit=do_commit,
-                        )),
-                        "raw_rule": raw_rule,
-                        "direct": direct,
-                        "order": order,
-                        "order_direct": order_direct,
-                        "parent": attrs.get("parent", False),
-                        "force_commit": attrs.get("force_commit", False),
-                        "ignore_case": attrs.get("ignore_case", False),
-                        "context": attrs["context"],
-                    })
     tree = PatchTree()
-    for item in patch:
-        sort_key = (
-            (item["order"] if item["order_direct"] else -item["order"]),
-            item["raw_rule"],
-            item["order_direct"],
-        )
-        if (not item["children"] and not item["parent"]) or not item["direct"]:
-            tree.add(item["row"], item["context"], sort_key)
-        else:
-            tree.add_block(item["row"], item["children"], item["context"], sort_key)
-        if item["force_commit"]:
-            tree.add("commit", item["context"], sort_key)
-    tree.sort()
-    return tree
+    for patch_row in patch_rows:
+        node = tree
+        for x in patch_row["row"]:
+            if not node.itms or node.itms[-1].row != x:
+                # FIXME: use methods
+                node.itms.append(PatchItem(x, None, patch_row["attrs"]["context"], ...))
+            if node.itms[-1].child is None:
+                node.itms[-1].child = PatchTree()
+            node = node.itms[-1].child
 
+    # print('patch_tree:', tree)
+
+    return tree
 
 def match_row_to_acl(row, rules, exclusive=False):
     matches = _find_acl_matches(row, rules)
@@ -517,7 +601,7 @@ def _find_acl_matches(row, rules):
                     rule["attrs"]["prio"],
                     # Calculate how specific matched regex is for the row
                     # based on how many symbols they share
-                    len(set(row).intersection(set(rule["attrs"][regexp_key].pattern))) / len(row),
+                    rule_weight(row, rule, regexp_key)
                 )
                 item = (
                     metric,

@@ -4,35 +4,60 @@
 #   обратной, но занимает место между прямыми там, где указано (т.е. undo vlan batch
 #   будет стоять после блоков interface).
 
-file
-    print
-    set
-
-snmp
-    community
-        set
-        add
-
-snmp
-    set
-
-system
-    logging
-        action
-            set
-            add
-        set
-        add
-
-interface
-    gre
-        add
+#file
+#    print
+#    set
+#
+#snmp
+#    community
+#        set
+#        add
+#
+#snmp
+#    set
+#
+#system
+#    logging
+#        action
+#            set
+#            add
+#        set
+#        add
 
 interface
-    list
-        member
-            add
-
-ip
-    address
+                        # 0
+    bridge
+                            # 0, 0
+        vlan
+                                # 0, 0, 0
+            remove
+                                    # 0, 0, 0, 0
+        port
+                                # 0, 0, 1
+            remove
+                                    # 0, 0, 1, 0
+        remove
+                                # 0, 0, 2
         add
+                                # 0, 0, 3
+        port
+                                # 0, 0, 4
+            add
+                                    # 0, 0, 4, 0
+        vlan
+                                # 0, 0, 5
+            add
+                                    # 0, 0, 5, 0
+
+#interface
+#    gre
+#        add
+#
+#interface
+#    list
+#        member
+#            add
+#
+#ip
+#    address
+#        add
