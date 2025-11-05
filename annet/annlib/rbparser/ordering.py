@@ -12,7 +12,7 @@ from . import syntax
 from typing import TypedDict, Any
 
 # =====
-# 'global' is a keyword, so we cant use standard TypedDict declaration
+# 'global' is a keyword, so we cant use normal TypedDict declaration
 CompiledOrderingAttrs = TypedDict("CompiledOrderingAttrs", {
     "direct_regexp": re.Pattern[str],
     "reverse_regexp": re.Pattern[str],
@@ -63,14 +63,15 @@ def decompile_ordering_rulebook(rb) -> str: # FIXME
 # =====
 
 
-def flatten_order_rb(rb: CompiledTree) -> Iterator[tuple[tuple[int, str, CompiledOrderingAttrs], ...]]:
-    for i, (raw_rule, rule) in enumerate(rb):
-            if rule["children"]:
-                for x in flatten_order_rb(rule["children"]):
-                    yield ((i, raw_rule, rule["attrs"]), *x)
+def flatten_order_rb(rb: CompiledTree, global_rules: CompiledTree = []) -> Iterator[tuple[tuple[int, str, CompiledOrderingAttrs], ...]]:
+    for i, (raw_rule, rule) in enumerate(global_rules):
+        yield ((i, raw_rule, rule["attrs"]),)
 
-            # else:
-                # FIXME: think about this
+    for i, (raw_rule, rule) in enumerate(rb, start=len(global_rules)):
+        if rule["children"]:
+            for x in flatten_order_rb(rule["children"], global_rules=global_rules + ([(raw_rule, rule)] if rule["attrs"]["global"] else [])):
+                yield ((i, raw_rule, rule["attrs"]), *x)
+
             yield ((i, raw_rule, rule["attrs"]),)
 
 def _compile_ordering(tree: syntax.ParsedTree, reverse_prefix: str) -> CompiledTree:
