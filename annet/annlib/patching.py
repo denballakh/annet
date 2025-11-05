@@ -227,10 +227,14 @@ class Orderer:
         vectors: list[tuple[float, SortKey]] = [] # [(weight, vector), ...]
         # INF = 1e6  # regular inf doesnt play well with sorting
         INF = float('inf')
+        # import pprint; print('rb:');pprint.pp([*flatten_order_rb(self.rb)])
+        # import pprint; print('row:');pprint.pp(row)
         for rb_row in flatten_order_rb(self.rb):
             vector: list[float] = []
             weight = 0.0
             matched = True
+            # print("="*50)
+            # print(rb_row)
 
             for rb_item, row_item in zip_longest(rb_row, row, fillvalue=None):
                 # print(rb_item, cmd_direct, row_item)
@@ -251,8 +255,13 @@ class Orderer:
                 # print(direct_matched, reverse_matched)
                 order_reverse = rb_attrs["order_reverse"]
                 # breakpoint()
+                # print(direct_matched, reverse_matched)
+                # print(rb_attrs, row_item)
+
                 if not order_reverse and direct_matched:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
+                    if 'remove' in rb_attrs["direct_regexp"].pattern:
+                        weight += 1e-6
                     vector.append(+rb_idx)
 
                 elif not order_reverse and reverse_matched:
@@ -263,14 +272,19 @@ class Orderer:
                 elif order_reverse and not cmd_direct and direct_matched:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
                     weight += 1e-6 # why? idk
-                    vector.append(rb_idx)
+                    vector.append(+rb_idx)
+                    # matched = True
+                    # break
 
                 elif block_exit and block_exit == row_item:
                     vector.append(INF)
+                    matched = True
+                    break
 
                 else:
                     matched = False
                     break
+
 
             if matched:
                 vectors.append((weight, (tuple(vector), matched_rules, cmd_direct)))
@@ -508,24 +522,32 @@ def _iterate_over_patch(
                 if direct is None:
                     continue
 
-                yield _PatchRow(
-                    row=(row,),
-                    attrs=attrs,
-                    direct=direct,
-                    rules=(raw_rule,),
-                )
+                has_children = False
                 if sub_pre is not None:
                     for sub_row in _iterate_over_patch(
                         sub_pre,
                         hw,
                         _root_pre=(_root_pre or pre),
                     ):
+                        has_children = True
+                        new_rules: list[str] = [raw_rule]
+                        for rule in sub_row["rules"]:
+                            if rule != new_rules[-1]:
+                                new_rules.append(rule)
                         yield _PatchRow(
                             row=(row, *sub_row["row"]),
                             attrs=sub_row["attrs"],
                             direct=sub_row["direct"],
-                            rules=(raw_rule, *sub_row["rules"]),
+                            rules=tuple(new_rules),
                         )
+
+                if not has_children:
+                    yield _PatchRow(
+                        row=(row,),
+                        attrs=attrs,
+                        direct=direct,
+                        rules=(raw_rule,),
+                    )
 
 def make_patch(
     pre: odict[str, _Content],
@@ -554,13 +576,14 @@ def make_patch(
     tree = PatchTree()
     for patch_row in patch_rows:
         node = tree
-        for x in patch_row["row"]:
+        for i, x in enumerate(patch_row["row"]):
             if not node.itms or node.itms[-1].row != x:
                 # FIXME: use methods
                 node.itms.append(PatchItem(x, None, patch_row["attrs"]["context"], ...))
-            if node.itms[-1].child is None:
-                node.itms[-1].child = PatchTree()
-            node = node.itms[-1].child
+            if i != len(patch_row["row"]) - 1:
+                if node.itms[-1].child is None:
+                    node.itms[-1].child = PatchTree()
+                node = node.itms[-1].child
 
     # print('patch_tree:', tree)
 
