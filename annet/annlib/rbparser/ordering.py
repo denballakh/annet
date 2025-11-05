@@ -69,9 +69,9 @@ def flatten_order_rb(rb: CompiledTree) -> Iterator[tuple[tuple[int, str, Compile
                 for x in flatten_order_rb(rule["children"]):
                     yield ((i, raw_rule, rule["attrs"]), *x)
 
-            else:
+            # else:
                 # FIXME: think about this
-                yield ((i, raw_rule, rule["attrs"]),)
+            yield ((i, raw_rule, rule["attrs"]),)
 
 def _compile_ordering(tree: syntax.ParsedTree, reverse_prefix: str) -> CompiledTree:
     # import pprint; print('_compile_ordering:');pprint.pp(tree)

@@ -228,7 +228,7 @@ class Orderer:
             vector: list[float] = []
             weight = 0.0
             for rb_item, row_item in zip_longest(rb_row, row, fillvalue=None):
-                # print(rb_item, cmd_direct, row_item)
+                print(rb_item, cmd_direct, row_item)
                 if rb_item is None:
                     ... # ?
                     break
@@ -238,26 +238,22 @@ class Orderer:
                     break
 
                 rb_idx, rb_rule_raw, rb_attrs = rb_item
+                rb_idx += 1  # so that negated index is always smaller
                 # print(row_item, rb_item)
 
                 direct_matched = bool(rb_attrs["direct_regexp"].match(row_item))
                 reverse_matched = bool(rb_attrs["reverse_regexp"].match(row_item))
+                # print(direct_matched, reverse_matched)
                 order_reverse = rb_attrs["order_reverse"]
                 # breakpoint()
                 if not order_reverse and direct_matched:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
-                    if direct_matched:
-                        vector.append(+rb_idx + 100)
-                    else:
-                        vector.append(-rb_idx + 200)
+                    vector.append(+rb_idx)
 
                 elif not order_reverse and reverse_matched:
                     # FIXME: add comment
                     weight += string_similarity(row_item, rb_attrs["reverse_regexp"].pattern) * 0.5
-                    if direct_matched:
-                        vector.append(+rb_idx + 100)
-                    else:
-                        vector.append(-rb_idx + 200)
+                    vector.append(-rb_idx)
 
                 elif order_reverse and not cmd_direct and direct_matched:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
@@ -265,16 +261,17 @@ class Orderer:
                     vector.append(rb_idx)
 
                 elif block_exit and block_exit == row_item:
-                    vector.append(float("inf"))
+                    vector.append(1e6)
 
                 else:
                     break
             else:
                 vectors.append((weight, tuple(vector)))
 
+        import pprint; print('row:');pprint.pp(row)
         # import pprint; print('vectors:');pprint.pp(vectors)
         if not vectors:
-            return (float("inf"),)
+            return (1e6,)
         vectors.sort()
         return vectors[-1][1]
 
@@ -531,15 +528,23 @@ def make_patch(
 ) -> PatchTree:
     if not orderer:
         orderer = Orderer(rb["ordering"], hw.vendor)
-    import pprint; print('pre:');pprint.pp(pre)
+    # import pprint; print('    ');pprint.pp(pre)
     # breakpoint()
     patch_rows = list(_iterate_over_patch(
         pre,
         hw,
         _root_pre=(_root_pre or pre),
     ))
-    # import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
-    patch_rows.sort(key=lambda row: orderer.get_order(row["row"], row["direct"]))
+    import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
+    def ic(x):
+        print(x)
+        return x
+    patch_rows.sort(key=lambda row: (
+        orderer.get_order(row["row"], cmd_direct=row["direct"]),
+        row["row"],
+        row["direct"],
+    ))
+    # import pprint;  print('patch_rows_sorted:'); pprint.pp(patch_rows)
 
     tree = PatchTree()
     for patch_row in patch_rows:
