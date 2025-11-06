@@ -3,6 +3,7 @@ from collections.abc import Iterable
 import copy
 import operator
 import re
+import sys
 import textwrap
 from collections import OrderedDict as odict
 from typing import (
@@ -13,6 +14,10 @@ from typing import (
     TypeAlias,
     TypedDict,
 )
+if sys.version_info >= (3, 11):
+    from typing import NotRequired as NotRequired
+else:
+    from typing import Union as NotRequired
 
 from .lib import jun_activate, merge_dicts, strip_annotation, uniq
 from .rbparser import platform
@@ -289,12 +294,15 @@ class Orderer:
             if matched:
                 vectors.append((weight, (tuple(vector), matched_rules, cmd_direct)))
 
-        # import pprint; print('row:');pprint.pp(row)
-        # import pprint; print('vectors:');pprint.pp(vectors)
+        import pprint; print('row:');pprint.pp(row)
+        import pprint; print('vectors:');pprint.pp(vectors)
         if not vectors:
             return ((0,), matched_rules, cmd_direct)
-        vectors.sort()
-        return vectors[-1][1]
+        vectors.sort(key=lambda x: (
+            -x[0], # we want biggest weight
+            x[1], # at smallest position
+        ))
+        return vectors[0][1]
 
         # f_order = None
         # f_weight = 0
@@ -481,7 +489,7 @@ class _PreAttrs(TypedDict):
     reverse: str
     comment: list[str]
     multiline: bool
-    parent: bool
+    parent: NotRequired[bool]
     force_commit: bool
     ignore_case: bool
     context: Any
@@ -499,6 +507,7 @@ class _PatchRow(TypedDict):
     attrs: _PreAttrs
     direct: bool
     rules: tuple[str, ...]
+    block: bool
 
 def _iterate_over_patch(
     pre: odict[str, _Content],
@@ -521,15 +530,31 @@ def _iterate_over_patch(
             for (direct, row, sub_pre) in iterable:
                 if direct is None:
                     continue
+                # print(row, sub_pre)
+                if sub_pre is None: # TODO: collapse
+                    yield _PatchRow(
+                        row=(row,),
+                        attrs=attrs,
+                        direct=direct,
+                        rules=(raw_rule,),
+                        block=False,
+                    )
 
-                has_children = False
-                if sub_pre is not None:
+                elif len(sub_pre) == 0:
+                    yield _PatchRow(
+                        row=(row,),
+                        attrs=attrs,
+                        direct=direct,
+                        rules=(raw_rule,),
+                        block=False,
+                    )
+
+                else:
                     for sub_row in _iterate_over_patch(
                         sub_pre,
                         hw,
                         _root_pre=(_root_pre or pre),
                     ):
-                        has_children = True
                         new_rules: list[str] = [raw_rule]
                         for rule in sub_row["rules"]:
                             if rule != new_rules[-1]:
@@ -539,15 +564,9 @@ def _iterate_over_patch(
                             attrs=sub_row["attrs"],
                             direct=sub_row["direct"],
                             rules=tuple(new_rules),
+                            block=sub_row["block"],
                         )
 
-                if not has_children:
-                    yield _PatchRow(
-                        row=(row,),
-                        attrs=attrs,
-                        direct=direct,
-                        rules=(raw_rule,),
-                    )
 
 def make_patch(
     pre: odict[str, _Content],
@@ -560,7 +579,7 @@ def make_patch(
 ) -> PatchTree:
     if not orderer:
         orderer = Orderer(rb["ordering"], hw.vendor)
-    # import pprint; print('    ');pprint.pp(pre)
+    # import pprint; print('pre:');pprint.pp(pre)
     # breakpoint()
     patch_rows = list(_iterate_over_patch(
         pre,
@@ -579,7 +598,12 @@ def make_patch(
         for i, x in enumerate(patch_row["row"]):
             if not node.itms or node.itms[-1].row != x:
                 # FIXME: use methods
-                node.itms.append(PatchItem(x, None, patch_row["attrs"]["context"], ...))
+                if not patch_row["block"] and not patch_row["attrs"].get("parent", False) or not patch_row["direct"]:
+                    subtree = None
+                else:
+                    subtree = PatchTree()
+                node.itms.append(PatchItem(x, subtree, patch_row["attrs"]["context"], ...))
+
             if i != len(patch_row["row"]) - 1:
                 if node.itms[-1].child is None:
                     node.itms[-1].child = PatchTree()
