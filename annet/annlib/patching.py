@@ -272,14 +272,12 @@ class Orderer:
                 elif not order_reverse and reverse_matched:
                     # FIXME: add comment
                     weight += string_similarity(row_item, rb_attrs["reverse_regexp"].pattern) * 0.5
-                    vector.append(-rb_idx)
+                    vector.append(rb_idx * (+1 if cmd_direct else -1))
 
                 elif order_reverse and not cmd_direct and direct_matched:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
                     weight += 1e-6 # why? idk
                     vector.append(+rb_idx)
-                    # matched = True
-                    # break
 
                 elif block_exit and block_exit == row_item:
                     vector.append(INF)
@@ -298,9 +296,15 @@ class Orderer:
         import pprint; print('vectors:');pprint.pp(vectors)
         if not vectors:
             return ((0,), matched_rules, cmd_direct)
+        # vectors.sort(key=lambda x: (
+        #     -x[0], # biggest weight
+        #     -len(x[1][0]), # most precise position
+        #     x[1], # the first one
+        # ))
         vectors.sort(key=lambda x: (
-            -x[0], # we want biggest weight
-            x[1], # at smallest position
+            -len(x[1][0]), # most precise position
+            -x[0], # biggest weight
+            x[1], # the first one
         ))
         return vectors[0][1]
 
@@ -512,13 +516,15 @@ class _PatchRow(TypedDict):
 def _iterate_over_patch(
     pre: odict[str, _Content],
     hw,
+    do_commit: bool,
+    add_comments: bool,
     _root_pre: odict[str, _Content] | None = None,
 ) -> Iterable[_PatchRow]:
-    for (raw_rule, content) in pre.items():
-        for (key, diff) in content["items"].items():
+    for raw_rule, content in pre.items():
+        for key, diff in content["items"].items():
             rule_pre = content.copy()
             attrs = copy.deepcopy(rule_pre["attrs"])
-
+            # print(attrs["logic"])
             iterable = attrs["logic"](
                 rule=attrs,
                 key=key,
@@ -530,11 +536,23 @@ def _iterate_over_patch(
             for (direct, row, sub_pre) in iterable:
                 if direct is None:
                     continue
+
+                if add_comments:
+                    comments = " ".join(attrs["comment"])
+                    for (macro, m_value) in _comment_macros.items():
+                        comments = comments.replace(macro, m_value)
+                    if comments:
+                        row = f"{row} {comments}"
+
+                if not do_commit and attrs.get("force_commit", False):
+                    # if do_commit is false skip patch that couldn't be applied without commit
+                    continue
+
                 # print(row, sub_pre)
                 if sub_pre is None: # TODO: collapse
                     yield _PatchRow(
                         row=(row,),
-                        attrs=attrs,
+                        attrs=attrs.copy(),
                         direct=direct,
                         rules=(raw_rule,),
                         block=False,
@@ -543,7 +561,7 @@ def _iterate_over_patch(
                 elif len(sub_pre) == 0:
                     yield _PatchRow(
                         row=(row,),
-                        attrs=attrs,
+                        attrs=attrs.copy(),
                         direct=direct,
                         rules=(raw_rule,),
                         block=False,
@@ -552,7 +570,9 @@ def _iterate_over_patch(
                 else:
                     for sub_row in _iterate_over_patch(
                         sub_pre,
-                        hw,
+                        hw=hw,
+                        add_comments=add_comments,
+                        do_commit=do_commit,
                         _root_pre=(_root_pre or pre),
                     ):
                         new_rules: list[str] = [raw_rule]
@@ -584,9 +604,11 @@ def make_patch(
     patch_rows = list(_iterate_over_patch(
         pre,
         hw,
+        add_comments=add_comments,
+        do_commit=do_commit,
         _root_pre=(_root_pre or pre),
     ))
-    # import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
+    import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
     _sort_keys = {row["row"]:orderer.get_order(row["row"],  matched_rules=row["rules"],cmd_direct=row["direct"]) for row in patch_rows}
     import pprint;  print('_sort_keys:'); pprint.pp(_sort_keys)
     patch_rows.sort(key=lambda row: orderer.get_order(row["row"], matched_rules=row["rules"],cmd_direct=row["direct"]))
@@ -603,6 +625,9 @@ def make_patch(
                 else:
                     subtree = PatchTree()
                 node.itms.append(PatchItem(x, subtree, patch_row["attrs"]["context"], ...))
+
+                if patch_row["attrs"].get("force_commit", False):
+                    node.itms.append(PatchItem("commit", None, patch_row["attrs"]["context"], ...))
 
             if i != len(patch_row["row"]) - 1:
                 if node.itms[-1].child is None:
