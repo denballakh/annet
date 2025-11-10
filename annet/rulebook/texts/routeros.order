@@ -30,7 +30,7 @@ interface
             remove
         port
             remove
-        remove
+        remove %order_reverse
         add
         port
             add

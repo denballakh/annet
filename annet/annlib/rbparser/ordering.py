@@ -63,16 +63,19 @@ def decompile_ordering_rulebook(rb) -> str: # FIXME
 # =====
 
 
-def flatten_order_rb(rb: CompiledTree, global_rules: CompiledTree = []) -> Iterator[tuple[tuple[int, str, CompiledOrderingAttrs], ...]]:
-    for i, (raw_rule, rule) in enumerate(global_rules):
-        yield ((i, raw_rule, rule["attrs"]),)
+def flatten_order_rb(rb: CompiledTree, global_rules: list[tuple[int, CompiledOrderingItem]] = []) -> Iterator[tuple[tuple[int, str, CompiledOrderingAttrs, list[tuple[int, CompiledOrderingItem]]], ...]]:
+    new_global_rules = global_rules[:]
 
-    for i, (raw_rule, rule) in enumerate(rb, start=len(global_rules)):
+    for i, (raw_rule, rule) in enumerate(rb):
+        if rule["attrs"]["global"]:
+            new_global_rules.append((i, rule))
+
+    for i, (raw_rule, rule) in enumerate(rb):
         if rule["children"]:
-            for x in flatten_order_rb(rule["children"], global_rules=global_rules + ([(raw_rule, rule)] if rule["attrs"]["global"] else [])):
-                yield ((i, raw_rule, rule["attrs"]), *x)
+            for x in flatten_order_rb(rule["children"], new_global_rules):
+                yield ((i, raw_rule, rule["attrs"], new_global_rules), *x)
 
-        yield ((i, raw_rule, rule["attrs"]),)
+        yield ((i, raw_rule, rule["attrs"], new_global_rules),)
 
 def _compile_ordering(tree: syntax.ParsedTree, reverse_prefix: str) -> CompiledTree:
     # import pprint; print('_compile_ordering:');pprint.pp(tree)
