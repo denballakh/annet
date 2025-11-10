@@ -25,10 +25,10 @@ system
         add
 
 interface
-    bridge           %splittable
-        vlan         %splittable
+    bridge
+        vlan
             remove
-        port         %splittable
+        port
             remove
         remove
         add

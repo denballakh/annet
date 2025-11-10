@@ -233,7 +233,7 @@ class Orderer:
         vectors: list[tuple[float, SortKey]] = [] # [(weight, vector), ...]
         # INF = 1e6  # regular inf doesnt play well with sorting
         INF = float('inf')
-        # import pprint; print('rb:');pprint.pp([*flatten_order_rb(self.rb)])
+        import pprint; print('rb:');pprint.pp([*flatten_order_rb(self.rb)])
         # import pprint; print('row:');pprint.pp(row)
         for rb_row in flatten_order_rb(self.rb):
             vector: list[tuple[float, tuple[str, ...]]] = []
@@ -241,21 +241,26 @@ class Orderer:
             matched = True
             # print("="*50)
             # print(rb_row)
-
-            for rb_item, row_item, key in zip_longest(rb_row, row, keys, fillvalue=None):
+            for i, (rb_item, row_item, key) in enumerate(zip_longest(rb_row, row, keys, fillvalue=None)):
+                if key is None:
+                    key = ()
                 # print(rb_item, cmd_direct, row_item)
                 if rb_item is None:
-                    matched = True
-                    break
+                    vector.append((0, key))
+                    continue
 
                 if row_item is None:
                     matched = False
                     break
 
-                if key is None:
-                    key = ()
 
                 rb_idx, _, rb_attrs = rb_item
+                if (
+                    (rule_scope := rb_attrs["scope"]) is not None
+                    and scope not in rule_scope
+                ):
+                    matched = False
+                    break
                 rb_idx += 1  # so that negated index is always smaller
                 # print(row_item, rb_item)
 
@@ -269,13 +274,20 @@ class Orderer:
 
                 if not order_reverse and direct_matched:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
-                    if 'remove' in rb_attrs["direct_regexp"].pattern:
+                    if 'remove' in rb_attrs["direct_regexp"].pattern: # ???????????????????????????????????????????
                         weight += 1e-6
+                    # if not cmd_direct and i == len(row) - 1:
+                    #     vector.append((-rb_idx, key))
+                    # else:
+                    #     vector.append((+rb_idx, key))
+                    # vector.append((rb_idx * (+1 if cmd_direct or i != len(row) - 1 else -1), key))
                     vector.append((+rb_idx, key))
+                    # if rb_idx == 47:
+                    #     breakpoint()
 
                 elif not order_reverse and reverse_matched:
                     # FIXME: add comment
-                    weight += string_similarity(row_item, rb_attrs["reverse_regexp"].pattern) * 0.5
+                    weight += string_similarity(row_item, rb_attrs["reverse_regexp"].pattern) * 0.5 # ???
                     vector.append((rb_idx * (+1 if cmd_direct else -1), key))
 
                 elif order_reverse and not cmd_direct and direct_matched:
@@ -605,7 +617,7 @@ def sort_patch_rows(orderer: Orderer, patch_rows: list[_PatchRow]) -> list[_Patc
     string_idxs: dict[tuple[tuple[str, ...], ...], int] = {}
     for i, row in enumerate(patch_rows):
         # SortKey: TypeAlias = tuple[tuple[tuple[float, tuple[str, ...]], ...], bool]
-        orderer_pos, direct = orderer.get_order(row["row"], keys=row["keys"],cmd_direct=row["direct"])
+        orderer_pos, direct = orderer.get_order(row["row"], keys=row["keys"],cmd_direct=row["direct"], scope="patch")
         keys = tuple(key for _, key in orderer_pos)
         for prefix_size in range(len(keys) + 1):
             prefix = keys[:prefix_size]
@@ -618,6 +630,7 @@ def sort_patch_rows(orderer: Orderer, patch_rows: list[_PatchRow]) -> list[_Patc
             sort_key.append((
                 idx,
                 row["rules"][j] if j < len(row["rules"]) else "",
+                True if j != len(orderer_pos) - 1 else row["direct"],
                 string_idxs[keys[:j+1]],
                 ))
 
@@ -640,7 +653,7 @@ def make_patch(
 ) -> PatchTree:
     if not orderer:
         orderer = Orderer(rb["ordering"], hw.vendor)
-    import pprint; print('pre:');pprint.pp(pre)
+    # import pprint; print('pre:');pprint.pp(pre)
     # breakpoint()
     patch_rows = list(_iterate_over_patch(
         pre,
@@ -649,7 +662,7 @@ def make_patch(
         do_commit=do_commit,
         _root_pre=(_root_pre or pre),
     ))
-    import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
+    # import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
     # _sort_keys = {row["row"]:orderer.get_order(row["row"], keys=row["keys"],cmd_direct=row["direct"]) for row in patch_rows}
     # import pprint;  print('_sort_keys:'); pprint.pp(_sort_keys)
     # patch_rows.sort(key=lambda row: orderer.get_order(row["row"], keys=row["keys"],cmd_direct=row["direct"]))

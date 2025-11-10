@@ -18,7 +18,7 @@ CompiledOrderingAttrs = TypedDict("CompiledOrderingAttrs", {
     "reverse_regexp": re.Pattern[str],
     "order_reverse": bool,
     "global": bool,  # TODO: rename to something else so that it is not a keyword
-    "scope": list[str],
+    "scope": list[str] | None,
     "raw_rule": str,
     "context": Any,
 })
