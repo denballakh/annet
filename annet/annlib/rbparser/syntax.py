@@ -12,7 +12,6 @@ from annet.vendors import tabparser
 # =====
 def parse_text(text: str, params_scheme) -> odict:
     ret =  _parse_tree_with_params(tabparser.parse_to_tree(text, _split_rows, ["#"]), params_scheme)
-    # import pprint; print('parse_text:');pprint.pp(ret)
     return ret
 
 
@@ -29,7 +28,6 @@ ParsedTree = list[tuple[str, ParsedTreeNode]]
 
 def parse_text_multi(text: str, params_scheme) -> ParsedTree:
     ret =  _parse_tree_with_params_multi(tabparser.parse_to_tree_multi(text, _split_rows, ["#"]), params_scheme)
-    # import pprint; print('parse_text_multi:');pprint.pp(ret)
     return ret
 
 @functools.lru_cache()

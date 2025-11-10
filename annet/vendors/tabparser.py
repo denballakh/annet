@@ -840,13 +840,11 @@ class RosFormatter(CommonFormatter):
 def parse_to_tree(text: str, splitter: Callable[[str], Iterator[str]], comments: Iterable[str] = ("!", "#")):
     tree = odict()
     for stack in _stacked(splitter(text), tuple(comments)):
-        # print(f"stack1: {stack}")
         local_tree = tree
         for key in stack:
             if key not in local_tree:
                 local_tree[key] = odict()
             local_tree = local_tree[key]
-    # import pprint; print('parse_to_tree:');pprint.pp(tree)
     return tree
 
 SimpleTree: TypeAlias = list[tuple[str, "SimpleTree"]]
@@ -854,13 +852,11 @@ SimpleTree: TypeAlias = list[tuple[str, "SimpleTree"]]
 def parse_to_tree_multi(text: str, splitter: Callable[[str], Iterator[str]], comments: Iterable[str] = ("!", "#")) -> SimpleTree:
     tree = []
     for stack in _stacked(splitter(text), tuple(comments)):
-        # print(f"stack2: {stack}")
         local_tree = tree
         for key in stack:
             if not local_tree or local_tree[-1][0] != key:
                 local_tree.append((key, []))
             local_tree = local_tree[-1][1]
-    # import pprint; print('parse_to_tree_multi:');pprint.pp(tree)
     return tree
 
 

@@ -78,7 +78,6 @@ def flatten_order_rb(rb: CompiledTree, global_rules: list[tuple[int, CompiledOrd
         yield ((i, raw_rule, rule["attrs"], new_global_rules),)
 
 def _compile_ordering(tree: syntax.ParsedTree, reverse_prefix: str) -> CompiledTree:
-    # import pprint; print('_compile_ordering:');pprint.pp(tree)
     ordering: CompiledTree = []
     for (rule_id, attrs) in tree:
         if attrs["type"] == "normal":
@@ -100,5 +99,4 @@ def _compile_ordering(tree: syntax.ParsedTree, reverse_prefix: str) -> CompiledT
                 }),
                 "children": _compile_ordering(attrs["children"], reverse_prefix),
             }))
-    # import pprint; print('_compile_ordering result:');pprint.pp(ordering)
     return ordering
