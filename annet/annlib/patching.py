@@ -3,6 +3,7 @@ from collections.abc import Iterable
 import copy
 import operator
 import re
+import string
 import sys
 import textwrap
 from collections import OrderedDict as odict
@@ -180,7 +181,7 @@ def string_similarity(s: str, pattern: str) -> float:
 def rule_weight(row: str, rule: CompiledOrderingItem, regexp_key: Literal["direct_regexp", "reverse_regexp"]) -> float:
     return string_similarity(row, rule["attrs"][regexp_key].pattern)
 
-SortKey: TypeAlias = tuple[tuple[float, ...], tuple[str, ...], bool]
+SortKey: TypeAlias = tuple[tuple[tuple[float, tuple[str, ...]], ...], bool]
 
 class Orderer:
     def __init__(self, rb: CompiledTree, vendor: str) -> None:
@@ -204,7 +205,7 @@ class Orderer:
         self,
         row: tuple[str, ...],
         cmd_direct: bool,
-        matched_rules: tuple[str, ...] = (),
+        keys: tuple[tuple[str, ...], ...] = (),
         scope: str | None = None,
     ) -> SortKey:
         """
@@ -235,13 +236,13 @@ class Orderer:
         # import pprint; print('rb:');pprint.pp([*flatten_order_rb(self.rb)])
         # import pprint; print('row:');pprint.pp(row)
         for rb_row in flatten_order_rb(self.rb):
-            vector: list[float] = []
+            vector: list[tuple[float, tuple[str, ...]]] = []
             weight = 0.0
             matched = True
             # print("="*50)
             # print(rb_row)
 
-            for rb_item, row_item in zip_longest(rb_row, row, fillvalue=None):
+            for rb_item, row_item, key in zip_longest(rb_row, row, keys, fillvalue=None):
                 # print(rb_item, cmd_direct, row_item)
                 if rb_item is None:
                     matched = True
@@ -250,6 +251,9 @@ class Orderer:
                 if row_item is None:
                     matched = False
                     break
+
+                if key is None:
+                    key = ()
 
                 rb_idx, _, rb_attrs = rb_item
                 rb_idx += 1  # so that negated index is always smaller
@@ -267,20 +271,20 @@ class Orderer:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
                     if 'remove' in rb_attrs["direct_regexp"].pattern:
                         weight += 1e-6
-                    vector.append(+rb_idx)
+                    vector.append((+rb_idx, key))
 
                 elif not order_reverse and reverse_matched:
                     # FIXME: add comment
                     weight += string_similarity(row_item, rb_attrs["reverse_regexp"].pattern) * 0.5
-                    vector.append(rb_idx * (+1 if cmd_direct else -1))
+                    vector.append((rb_idx * (+1 if cmd_direct else -1), key))
 
                 elif order_reverse and not cmd_direct and direct_matched:
                     weight += string_similarity(row_item, rb_attrs["direct_regexp"].pattern)
                     weight += 1e-6 # why? idk
-                    vector.append(+rb_idx)
+                    vector.append((+rb_idx, key))
 
                 elif block_exit and block_exit == row_item:
-                    vector.append(INF)
+                    vector.append((INF, ()))
                     matched = True
                     break
 
@@ -290,15 +294,20 @@ class Orderer:
 
 
             if matched:
-                vectors.append((weight, (tuple(vector), matched_rules, cmd_direct)))
+                vectors.append((weight, (tuple(vector), cmd_direct)))
 
         import pprint; print('row:');pprint.pp(row)
         import pprint; print('vectors:');pprint.pp(vectors)
         if not vectors:
-            return ((0,), matched_rules, cmd_direct)
+            return (((0, ()),), cmd_direct)
         # vectors.sort(key=lambda x: (
         #     -x[0], # biggest weight
         #     -len(x[1][0]), # most precise position
+        #     x[1], # the first one
+        # ))
+        # vectors.sort(key=lambda x: (
+        #     -len(x[1][0]), # most precise position
+        #     -x[0], # biggest weight
         #     x[1], # the first one
         # ))
         vectors.sort(key=lambda x: (
@@ -319,21 +328,21 @@ class Orderer:
 
         # return (f_order or 0), cmd_direct, children, f_rule
 
-    def order_config(self, config: dict[str, Any]) -> dict[str, Any]:
+    def order_config(self, config: dict[str, Any], _path: tuple[str, ...] = ()) -> dict[str, Any]:
         if self.vendor not in registry_connector.get():
             return config
         if not config:
             return odict()
 
         ret: dict[str, Any] = {}
-        sort_keys: dict[str, tuple[int, ...]] = {}
+        sort_keys: dict[str, SortKey] = {}
 
         reverse_prefix = registry_connector.get()[self.vendor].reverse
         for row, children in config.items():
             cmd_direct = not row.startswith(reverse_prefix)
 
-            sort_key = self.get_order(row, cmd_direct)
-            children = self.order_config(children)
+            sort_key = self.get_order(_path + (row,), cmd_direct=cmd_direct)
+            children = self.order_config(children, _path=(*_path, row))
             ret[row] = children
             sort_keys[row] = sort_key
 
@@ -504,10 +513,11 @@ class _DiffItem(TypedDict):
 
 class _Content(TypedDict):
     attrs: _PreAttrs
-    items: odict[str | tuple[()], dict[Op, list[_DiffItem]]]
+    items: odict[tuple[str, ...], dict[Op, list[_DiffItem]]]
 
 class _PatchRow(TypedDict):
     row: tuple[str, ...]
+    keys: tuple[tuple[str, ...], ...]
     attrs: _PreAttrs
     direct: bool
     rules: tuple[str, ...]
@@ -552,6 +562,7 @@ def _iterate_over_patch(
                 if sub_pre is None: # TODO: collapse
                     yield _PatchRow(
                         row=(row,),
+                        keys=(key,),
                         attrs=attrs.copy(),
                         direct=direct,
                         rules=(raw_rule,),
@@ -561,6 +572,7 @@ def _iterate_over_patch(
                 elif len(sub_pre) == 0:
                     yield _PatchRow(
                         row=(row,),
+                        keys=(key,),
                         attrs=attrs.copy(),
                         direct=direct,
                         rules=(raw_rule,),
@@ -581,12 +593,41 @@ def _iterate_over_patch(
                                 new_rules.append(rule)
                         yield _PatchRow(
                             row=(row, *sub_row["row"]),
+                            keys=(key, *sub_row["keys"]),
                             attrs=sub_row["attrs"],
                             direct=sub_row["direct"],
                             rules=tuple(new_rules),
                             block=sub_row["block"],
                         )
 
+def sort_patch_rows(orderer: Orderer, patch_rows: list[_PatchRow]) -> list[_PatchRow]:
+    sort_keys = []
+    string_idxs: dict[tuple[tuple[str, ...], ...], int] = {}
+    for i, row in enumerate(patch_rows):
+        # SortKey: TypeAlias = tuple[tuple[tuple[float, tuple[str, ...]], ...], bool]
+        orderer_pos, direct = orderer.get_order(row["row"], keys=row["keys"],cmd_direct=row["direct"])
+        keys = tuple(key for _, key in orderer_pos)
+        for prefix_size in range(len(keys) + 1):
+            prefix = keys[:prefix_size]
+            if prefix not in string_idxs:
+                string_idxs[prefix] = i
+
+        sort_key: list[tuple[float, int]] = []
+        # print(row)
+        for j, (idx, _) in enumerate(orderer_pos):
+            sort_key.append((
+                idx,
+                row["rules"][j] if j < len(row["rules"]) else "",
+                string_idxs[keys[:j+1]],
+                ))
+
+        sort_keys.append((sort_key, direct, keys))
+    from pprint import pp; print('str_idxs:');pp(string_idxs)
+    from pprint import pp; print('sort_keys:');pp({row["row"]:key for row, key in zip(patch_rows, sort_keys)})
+    patch_rows__idxs = [(row, i) for i, row in enumerate(patch_rows)]
+    patch_rows__idxs.sort(key=lambda row_idx: sort_keys[row_idx[1]])
+
+    return [row for row, _ in patch_rows__idxs]
 
 def make_patch(
     pre: odict[str, _Content],
@@ -599,7 +640,7 @@ def make_patch(
 ) -> PatchTree:
     if not orderer:
         orderer = Orderer(rb["ordering"], hw.vendor)
-    # import pprint; print('pre:');pprint.pp(pre)
+    import pprint; print('pre:');pprint.pp(pre)
     # breakpoint()
     patch_rows = list(_iterate_over_patch(
         pre,
@@ -609,10 +650,11 @@ def make_patch(
         _root_pre=(_root_pre or pre),
     ))
     import pprint;  print('patch_rows:'); pprint.pp(patch_rows)
-    _sort_keys = {row["row"]:orderer.get_order(row["row"],  matched_rules=row["rules"],cmd_direct=row["direct"]) for row in patch_rows}
-    import pprint;  print('_sort_keys:'); pprint.pp(_sort_keys)
-    patch_rows.sort(key=lambda row: orderer.get_order(row["row"], matched_rules=row["rules"],cmd_direct=row["direct"]))
-    # import pprint;  print('patch_rows_sorted:'); pprint.pp(patch_rows)
+    # _sort_keys = {row["row"]:orderer.get_order(row["row"], keys=row["keys"],cmd_direct=row["direct"]) for row in patch_rows}
+    # import pprint;  print('_sort_keys:'); pprint.pp(_sort_keys)
+    # patch_rows.sort(key=lambda row: orderer.get_order(row["row"], keys=row["keys"],cmd_direct=row["direct"]))
+    # # import pprint;  print('patch_rows_sorted:'); pprint.pp(patch_rows)
+    patch_rows = sort_patch_rows(orderer, patch_rows)
 
     tree = PatchTree()
     for patch_row in patch_rows:
